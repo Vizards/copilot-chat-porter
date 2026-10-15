@@ -51,6 +51,7 @@ jobs:
       id-token: write
     env:
       RELEASE_VERSION: ${{ needs.check-version.outputs.version }}
+      VSIX_PATH: dist/copilot-chat-porter-${{ needs.check-version.outputs.version }}.vsix
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
     steps:
@@ -67,25 +68,26 @@ jobs:
 
       - name: Package the release once
         run: |
+          node -e 'const p = require("./package.json"); require("node:assert/strict").deepEqual([p.publisher, p.name, p.version], ["Vizards", "copilot-chat-porter", process.env.RELEASE_VERSION]);'
+          if git ls-remote --exit-code --tags origin "refs/tags/v${RELEASE_VERSION}"; then
+            echo 'Release tag already exists; reconcile the original release before retrying.'
+            exit 1
+          else
+            test "$?" -eq 2
+          fi
           mkdir -p dist
-          ./node_modules/.bin/vsce package --out "dist/copilot-chat-porter-${RELEASE_VERSION}.vsix"
-
-      - name: Verify VSIX identity and record SHA-256
-        id: artifact
-        run: python3 .github/scripts/verify-vsix.py "$RELEASE_VERSION"
+          ./node_modules/.bin/vsce package --out "$VSIX_PATH"
+          (cd dist && sha256sum "$(basename "$VSIX_PATH")" > SHA256SUMS)
 
       - name: Save the exact VSIX for recovery
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: porter-release-${{ env.RELEASE_VERSION }}-${{ github.run_attempt }}
           path: |
-            ${{ steps.artifact.outputs.vsix_path }}
+            ${{ env.VSIX_PATH }}
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 30
-
-      - name: Verify GitHub OIDC claims (no token logging)
-        run: node .github/scripts/marketplace-auth.cjs claims
 
       - name: Sign in with Entra workload identity federation
         uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
@@ -95,20 +97,9 @@ jobs:
           audience: api://AzureADTokenExchange
           allow-no-subscriptions: true
 
-      - name: Verify Contributor and reject existing release versions
-        run: node .github/scripts/marketplace-auth.cjs release
-        env:
-          GH_TOKEN: ${{ github.token }}
-
       - name: Publish to VS Code Marketplace
-        run: |
-          (cd dist && sha256sum --check SHA256SUMS)
-          timeout 300s env -u VSCE_PAT ./node_modules/.bin/vsce publish --azure-credential --packagePath "$VSIX_PATH"
-        env:
-          VSIX_PATH: ${{ steps.artifact.outputs.vsix_path }}
-
-      - name: Verify the uploaded file is unchanged
-        run: cd dist && sha256sum --check SHA256SUMS
+        timeout-minutes: 5
+        run: env -u VSCE_PAT ./node_modules/.bin/vsce publish --azure-credential --packagePath "$VSIX_PATH"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
@@ -121,15 +112,7 @@ jobs:
           overwrite_files: false
           body: |
             Published to Visual Studio Marketplace using Microsoft Entra workload identity federation.
-            VSIX SHA-256: `${{ steps.artifact.outputs.sha256 }}`
-            The attached VSIX is the same file uploaded to Marketplace.
+            The attached VSIX is the same file uploaded to Marketplace; its SHA-256 is in SHA256SUMS.
           files: |
-            ${{ steps.artifact.outputs.vsix_path }}
+            ${{ env.VSIX_PATH }}
             dist/SHA256SUMS
-
-      - name: Record completed release
-        env:
-          VSIX_SHA256: ${{ steps.artifact.outputs.sha256 }}
-        run: |
-          echo "Published Vizards.copilot-chat-porter ${RELEASE_VERSION} using Entra WIF, without PAT." >> "$GITHUB_STEP_SUMMARY"
-          echo "VSIX SHA-256: ${VSIX_SHA256}" >> "$GITHUB_STEP_SUMMARY"

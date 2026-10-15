@@ -1,7 +1,6 @@
 out/
 dist/
 node_modules/
-__pycache__/
 *.vsix
 .chat-export-tmp-*
 tmp/
