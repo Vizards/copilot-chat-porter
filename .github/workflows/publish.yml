@@ -99,7 +99,7 @@ jobs:
 
       - name: Publish to VS Code Marketplace
         timeout-minutes: 5
-        run: env -u VSCE_PAT ./node_modules/.bin/vsce publish --azure-credential --packagePath "$VSIX_PATH"
+        run: ./node_modules/.bin/vsce publish --azure-credential --packagePath "$VSIX_PATH"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
