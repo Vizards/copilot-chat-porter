@@ -1,0 +1,71 @@
+name: Marketplace authentication
+
+on:
+  workflow_dispatch:
+    inputs:
+      check:
+        description: 'profile retrieves the new identity ID; full also verifies publisher access'
+        type: choice
+        options: [full, profile]
+        default: full
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: marketplace-auth-production
+  cancel-in-progress: false
+
+jobs:
+  authenticate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CORE_OUTPUT: none
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Verify GitHub OIDC claims (no token logging)
+        run: node .github/scripts/marketplace-auth.cjs claims
+
+      - name: Sign in with Entra workload identity federation
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          audience: api://AzureADTokenExchange
+          allow-no-subscriptions: true
+
+      - name: Get Marketplace profile (setup only)
+        if: inputs.check == 'profile'
+        run: node .github/scripts/marketplace-auth.cjs profile
+
+      - name: Install locked publishing dependencies
+        if: inputs.check == 'full'
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Verify publisher Contributor and extension read access
+        if: inputs.check == 'full'
+        run: node .github/scripts/marketplace-auth.cjs full
+
+      - name: Verify the existing vsce Azure credential path
+        if: inputs.check == 'full'
+        run: timeout 180s env -u VSCE_PAT ./node_modules/.bin/vsce verify-pat Vizards --azure-credential
+
+      - name: Record full verification result
+        if: inputs.check == 'full'
+        run: echo 'Full no-PAT authentication checks passed. No extension was uploaded.' >> "$GITHUB_STEP_SUMMARY"
