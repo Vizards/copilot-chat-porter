@@ -19,9 +19,15 @@ jobs:
 
       - run: npm ci
 
+      - name: Test release artifact checks
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+
       - run: npm run compile
 
       - run: mkdir -p dist && npx vsce package -o dist/
+
+      - name: Verify packaged extension identity
+        run: python3 .github/scripts/verify-vsix.py "$(node -p "require('./package.json').version")"
 
       - uses: actions/upload-artifact@v4
         with:

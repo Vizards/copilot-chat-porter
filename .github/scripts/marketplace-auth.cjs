@@ -47,6 +47,9 @@ function azureJson(args) {
 }
 
 async function checkClaims() {
+  const workflowRef = requireEnv('GITHUB_WORKFLOW_REF');
+  assert(['marketplace-auth.yml', 'publish.yml'].some(file =>
+    workflowRef === `${repository}/.github/workflows/${file}@refs/heads/main`), 'Unexpected workflow');
   const url = new URL(requireEnv('ACTIONS_ID_TOKEN_REQUEST_URL'));
   url.searchParams.set('audience', audience);
   const result = await readJson(url, requireEnv('ACTIONS_ID_TOKEN_REQUEST_TOKEN'));
@@ -62,7 +65,7 @@ async function checkClaims() {
     repository_owner_id: '13443193',
     ref: 'refs/heads/main',
     environment: 'production',
-    workflow_ref: `${repository}/.github/workflows/marketplace-auth.yml@refs/heads/main`,
+    workflow_ref: workflowRef,
   };
   for (const [name, value] of Object.entries(expected)) {
     assert.equal(claims[name], value, `Unexpected GitHub OIDC ${name}`);
@@ -91,6 +94,7 @@ async function checkMarketplace(mode) {
   }
 
   const { WebApi, getBearerHandler } = require('azure-devops-node-api');
+  const { ExtensionQueryFlags } = require('azure-devops-node-api/interfaces/GalleryInterfaces');
   const api = new WebApi('https://marketplace.visualstudio.com', getBearerHandler(credential.accessToken), {
     socketTimeout: 30_000, allowRetries: false,
   });
@@ -108,19 +112,36 @@ async function checkMarketplace(mode) {
   let published;
   try {
     const gallery = await api.getGalleryApi();
-    published = await gallery.getExtension(undefined, publisher, extension);
+    published = await gallery.getExtension(undefined, publisher, extension, undefined, ExtensionQueryFlags.IncludeVersions);
   } catch (error) {
     throw new Error(`Marketplace extension lookup failed (HTTP ${Number(error.statusCode) || 'unknown'})`);
   }
   assert.equal(published.publisher?.publisherName?.toLowerCase(), publisher.toLowerCase(), 'Wrong publisher returned');
   assert.equal(published.extensionName, extension, 'Wrong extension returned');
   report('Verified extension', `${published.publisher.publisherName}.${published.extensionName}`);
+
+  if (mode === 'release') {
+    const version = requireEnv('RELEASE_VERSION');
+    assert.match(version, /^\d+\.\d+\.\d+$/, 'Expected a stable release version');
+    assert(Array.isArray(published.versions) && published.versions.length, 'Marketplace did not return version history');
+    assert(!published.versions.some(item => item.version === version),
+      `Marketplace version ${version} already exists. Reconcile the original run and saved VSIX before retrying; do not skip duplicates.`);
+    for (const resource of ['releases/tags', 'git/ref/tags']) {
+      const response = await fetch(`https://api.github.com/repos/${repository}/${resource}/v${version}`, {
+        headers: { Authorization: `Bearer ${requireEnv('GH_TOKEN')}`, Accept: 'application/vnd.github+json' },
+        redirect: 'error', signal: AbortSignal.timeout(30_000),
+      });
+      assert.equal(response.status, 404,
+        `GitHub ${resource}/v${version} must be absent before publishing (HTTP ${response.status}); reconcile existing releases/tags or request errors first`);
+    }
+    report('Verified new release version', version);
+  }
 }
 
 async function main() {
   assert(!process.env.VSCE_PAT, 'VSCE_PAT must not be injected into this workflow');
   const mode = process.argv[2];
-  assert(['claims', 'profile', 'full'].includes(mode), 'Expected claims, profile, or full');
+  assert(['claims', 'profile', 'full', 'release'].includes(mode), 'Expected claims, profile, full, or release');
   if (mode === 'claims') await checkClaims();
   else await checkMarketplace(mode);
 }
