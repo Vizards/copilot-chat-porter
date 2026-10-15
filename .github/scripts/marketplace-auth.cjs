@@ -82,7 +82,8 @@ async function checkMarketplace(mode) {
   console.log(`::add-mask::${credential.accessToken}`);
   const profile = await readJson('https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1', credential.accessToken);
   assert.match(profile.id || '', /^[0-9a-f-]{36}$/i, 'Marketplace profile ID is missing');
-  assert.equal(profile.displayName, 'porter-marketplace-publisher', 'Unexpected Marketplace profile name');
+  // /me uses the authenticated app identity checked above. Service principal
+  // display names can be tenant/object identifiers, not the Entra app name.
   report('Marketplace profile', { id: profile.id, displayName: profile.displayName });
   if (mode === 'profile') {
     report('Setup result', 'Profile lookup only; publisher permission is NOT verified. Run full after assigning Contributor.');
