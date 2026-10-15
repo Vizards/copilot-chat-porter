@@ -2,7 +2,7 @@
   "name": "copilot-chat-porter",
   "displayName": "Copilot Chat Porter",
   "description": "Let GitHub Copilot Chat export and import its own conversation history via natural language",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "Vizards",
   "license": "MIT",
   "repository": {

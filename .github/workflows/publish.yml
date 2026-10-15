@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: porter-marketplace-publish
+  cancel-in-progress: false
+
 jobs:
   check-version:
     runs-on: ubuntu-latest
@@ -11,14 +18,16 @@ jobs:
       changed: ${{ steps.version.outputs.changed }}
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 2
+          persist-credentials: false
 
       - name: Check version change
         id: version
         run: |
           CURRENT=$(node -p "require('./package.json').version")
+          [[ "$CURRENT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected a stable release version'; exit 1; }
           PREVIOUS=$(git show HEAD~1:package.json 2>/dev/null | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo "")
           echo "current=$CURRENT"
           echo "previous=$PREVIOUS"
@@ -33,32 +42,94 @@ jobs:
 
   publish:
     needs: check-version
-    if: needs.check-version.outputs.changed == 'true'
+    if: github.ref == 'refs/heads/main' && needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: production
     permissions:
       contents: write
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.check-version.outputs.version }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
           cache: npm
 
-      - run: npm ci
+      - run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - run: mkdir -p dist && npx vsce package -o dist/
+      - name: Package the release once
+        run: |
+          mkdir -p dist
+          ./node_modules/.bin/vsce package --out "dist/copilot-chat-porter-${RELEASE_VERSION}.vsix"
+
+      - name: Verify VSIX identity and record SHA-256
+        id: artifact
+        run: python3 .github/scripts/verify-vsix.py "$RELEASE_VERSION"
+
+      - name: Save the exact VSIX for recovery
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: porter-release-${{ env.RELEASE_VERSION }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.artifact.outputs.vsix_path }}
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Verify GitHub OIDC claims (no token logging)
+        run: node .github/scripts/marketplace-auth.cjs claims
+
+      - name: Sign in with Entra workload identity federation
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          audience: api://AzureADTokenExchange
+          allow-no-subscriptions: true
+
+      - name: Verify Contributor and reject existing release versions
+        run: node .github/scripts/marketplace-auth.cjs release
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Publish to VS Code Marketplace
-        run: npx vsce publish
+        run: |
+          (cd dist && sha256sum --check SHA256SUMS)
+          timeout 300s env -u VSCE_PAT ./node_modules/.bin/vsce publish --azure-credential --packagePath "$VSIX_PATH"
         env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          VSIX_PATH: ${{ steps.artifact.outputs.vsix_path }}
+
+      - name: Verify the uploaded file is unchanged
+        run: cd dist && sha256sum --check SHA256SUMS
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: v${{ needs.check-version.outputs.version }}
           name: v${{ needs.check-version.outputs.version }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
-          files: dist/*.vsix
+          fail_on_unmatched_files: true
+          overwrite_files: false
+          body: |
+            Published to Visual Studio Marketplace using Microsoft Entra workload identity federation.
+            VSIX SHA-256: `${{ steps.artifact.outputs.sha256 }}`
+            The attached VSIX is the same file uploaded to Marketplace.
+          files: |
+            ${{ steps.artifact.outputs.vsix_path }}
+            dist/SHA256SUMS
+
+      - name: Record completed release
+        env:
+          VSIX_SHA256: ${{ steps.artifact.outputs.sha256 }}
+        run: |
+          echo "Published Vizards.copilot-chat-porter ${RELEASE_VERSION} using Entra WIF, without PAT." >> "$GITHUB_STEP_SUMMARY"
+          echo "VSIX SHA-256: ${VSIX_SHA256}" >> "$GITHUB_STEP_SUMMARY"

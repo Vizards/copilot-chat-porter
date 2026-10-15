@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2
+
+- **Release maintenance**: Switch Marketplace publishing to Microsoft Entra workload identity federation, retain production approval, and publish the same verified VSIX attached to GitHub Releases. Extension functionality is unchanged.
+
 ## 0.1.1
 
 - **Codespaces support**: Fix LM Tool calls hanging in GitHub Codespaces by setting `extensionKind` to `workspace`, ensuring the extension runs in the same host as Copilot Chat
